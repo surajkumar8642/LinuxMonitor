@@ -80,6 +80,7 @@ TEMPLATE = """
 
     <div class="card" style="margin-top:14px;">
       <div class="title"><span class="ico">+</span>Router Health</div>
+      <button class="btn" style="margin-top:0; margin-bottom:8px;" onclick="goDetail('routerhealth','router','Router Health Details')">Open Router Health Details</button>
       <table>
         <thead><tr><th>Check</th><th>Status</th><th>Details</th></tr></thead>
         <tbody id="rhealth"></tbody>
@@ -364,6 +365,22 @@ def run(cmd, include_stderr=False):
     return out
 
 
+def run_privileged(cmd, include_stderr=False):
+    if not admin_active():
+        return run(cmd, include_stderr=include_stderr)
+    p = subprocess.run(
+        f"sudo -n sh -c {subprocess.list2cmdline([cmd])}",
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE if include_stderr else subprocess.DEVNULL,
+        text=True,
+    )
+    out = p.stdout.strip()
+    if include_stderr and p.stderr.strip():
+        out = (out + "\n" + p.stderr.strip()).strip()
+    return out
+
+
 def allowed_domains_file():
     return os.environ.get("LINUXMONITOR_ALLOWED_DOMAINS_FILE", DEFAULT_ALLOWED_DOMAINS_FILE)
 
@@ -508,7 +525,7 @@ def firewall_policy_label():
 
 
 def ufw_default_policies():
-    out = run("ufw status verbose", include_stderr=True)
+    out = run_privileged("ufw status verbose", include_stderr=True)
     low = out.lower()
     if "need to be root" in low or "permission denied" in low:
         return "needs-admin", "needs-admin"
@@ -529,7 +546,7 @@ def ufw_default_policies():
 
 def interface_rule_counts():
     rows = {}
-    out = run("ufw status numbered", include_stderr=True)
+    out = run_privileged("ufw status numbered", include_stderr=True)
     low = out.lower()
     if "need to be root" in low or "permission denied" in low:
         return {}, "needs-admin"
@@ -889,6 +906,44 @@ def router_health():
     return {"checks": checks}
 
 
+def router_health_details_text():
+    rp = router_policy()
+    allowed_domains = rp.get("allowed_domains", [])
+    health = router_health().get("checks", [])
+    flow = run_privileged("nft list chain inet router_acl forward", include_stderr=True)
+    input_chain = run_privileged("nft list chain inet router_acl input", include_stderr=True)
+    nat_pre = run_privileged("nft list chain ip nat prerouting", include_stderr=True)
+    nat_post = run_privileged("nft list chain ip nat postrouting", include_stderr=True)
+    deny_logs = run("journalctl -k -n 80 --no-pager | rg -n \"router-deny|router-dns-deny\"") if shutil.which("rg") else run("journalctl -k -n 80 --no-pager | grep -n \"router-deny\\|router-dns-deny\"")
+
+    parts = []
+    parts.append("[Router Health Summary]")
+    for c in health:
+        parts.append(f"- {c['name']}: {c['level']} | {c['detail']}")
+
+    parts.append("\n[Allowed Domains]")
+    parts.append("\n".join(allowed_domains) if allowed_domains else "none")
+
+    parts.append("\n[Traffic Flow]")
+    parts.append("Client PC (enp3s0) -> forward chain -> allow sets -> NAT postrouting -> internet via enp1s0")
+
+    parts.append("\n[Firewall Impact: Forward Chain]")
+    parts.append(flow or "No forward chain output")
+
+    parts.append("\n[Firewall Impact: Input Chain]")
+    parts.append(input_chain or "No input chain output")
+
+    parts.append("\n[Firewall Impact: NAT Prerouting]")
+    parts.append(nat_pre or "No nat prerouting output")
+
+    parts.append("\n[Firewall Impact: NAT Postrouting]")
+    parts.append(nat_post or "No nat postrouting output")
+
+    parts.append("\n[Recent Deny Logs]")
+    parts.append(deny_logs or "No recent router deny logs")
+    return "\n".join(parts)
+
+
 def admin_active():
     exp = session.get("admin_exp")
     if not exp:
@@ -1064,13 +1119,13 @@ def api_details():
     if kind == "ufw":
         chunks = []
         if shutil.which("ufw"):
-            chunks.append("$ ufw status verbose\n" + run("ufw status verbose", include_stderr=True))
-            chunks.append("$ ufw status numbered\n" + run("ufw status numbered", include_stderr=True))
-            chunks.append("$ ufw show raw\n" + run("ufw show raw", include_stderr=True))
+            chunks.append("$ ufw status verbose\n" + run_privileged("ufw status verbose", include_stderr=True))
+            chunks.append("$ ufw status numbered\n" + run_privileged("ufw status numbered", include_stderr=True))
+            chunks.append("$ ufw show raw\n" + run_privileged("ufw show raw", include_stderr=True))
         else:
             chunks.append("ufw not installed")
-        chunks.append("$ nft list ruleset\n" + (run("nft list ruleset", include_stderr=True) or "No nft output"))
-        chunks.append("$ iptables -S\n" + (run("iptables -S", include_stderr=True) or "No iptables output"))
+        chunks.append("$ nft list ruleset\n" + (run_privileged("nft list ruleset", include_stderr=True) or "No nft output"))
+        chunks.append("$ iptables -S\n" + (run_privileged("iptables -S", include_stderr=True) or "No iptables output"))
         ports = listening_ports()
         chunks.append(f"Listening ports count: {len(ports)}")
         chunks.append("\n".join([f"{p['proto']} {p['local']} {p['process']}" for p in ports[:50]]) or "No listening ports found")
@@ -1079,7 +1134,7 @@ def api_details():
 
     if kind == "smb":
         chunks = []
-        chunks.append("$ systemctl status smbd.service --no-pager -n 30\n" + (run("systemctl status smbd.service --no-pager -n 30", include_stderr=True) or "No output"))
+        chunks.append("$ systemctl status smbd.service --no-pager -n 30\n" + (run_privileged("systemctl status smbd.service --no-pager -n 30", include_stderr=True) or "No output"))
         chunks.append("$ testparm -s\n" + (run("testparm -s", include_stderr=True) or "testparm not available or no output"))
         chunks.append("$ net usershare list\n" + (run("net usershare list", include_stderr=True) or "No usershares"))
         usershares = run("net usershare list", include_stderr=False).splitlines()
@@ -1091,8 +1146,8 @@ def api_details():
                     details.append(f"$ net usershare info '{share}'\n" + run(f"net usershare info '{share}'", include_stderr=True))
             if details:
                 chunks.append("\n\n".join(details))
-        chunks.append("$ smbstatus -S\n" + (run("smbstatus -S", include_stderr=True) or "No active SMB sessions"))
-        chunks.append("$ smbstatus -L\n" + (run("smbstatus -L", include_stderr=True) or "No SMB locks"))
+        chunks.append("$ smbstatus -S\n" + (run_privileged("smbstatus -S", include_stderr=True) or "No active SMB sessions"))
+        chunks.append("$ smbstatus -L\n" + (run_privileged("smbstatus -L", include_stderr=True) or "No SMB locks"))
         return jsonify({"details": "\n\n".join(chunks)})
 
     if kind == "connection":
@@ -1127,6 +1182,9 @@ def api_details():
             out.append(f"$ {c}\n{run(c)}")
         out.append("$ ss -tun state established | head -n 30\n" + run("ss -tun state established | head -n 30"))
         return jsonify({"details": "\n\n".join(out)})
+
+    if kind == "routerhealth":
+        return jsonify({"details": router_health_details_text()})
 
     return jsonify({"details": "Unknown detail type"})
 
