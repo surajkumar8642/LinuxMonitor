@@ -161,23 +161,15 @@ TEMPLATE = """
     <button class="btn" onclick="load()">Refresh</button>
     <div class="small">API: /api/status</div>
 
-    <div class="card" style="margin-top:14px;">
-      <div class="title">Details (Click Any Item Above)</div>
-      <div id="detail-title" class="value">No item selected</div>
-      <pre id="detail-body" style="white-space:pre-wrap; margin:10px 0 0; color:var(--muted); font-size:13px;"></pre>
-    </div>
   </div>
 
 <script>
 function cls(v){ if(v==='active' || v==='running' || v===true) return 'ok'; if(v==='inactive' || v==='unknown') return 'warn'; return 'bad'; }
 function text(v){ return (v===true)?'yes':(v===false)?'no':String(v); }
 function esc(s){ return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\"','&quot;').replaceAll(\"'\",'&#39;'); }
-async function showDetails(kind, name, label){
-  const url = `/api/details?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name || '')}`;
-  const r = await fetch(url);
-  const d = await r.json();
-  document.getElementById('detail-title').textContent = label;
-  document.getElementById('detail-body').textContent = d.details || 'No details';
+function goDetail(kind, name, label){
+  const url = `/view?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name || '')}&label=${encodeURIComponent(label || '')}`;
+  window.location.href = url;
 }
 async function changeRule(action){
   const domain = document.getElementById('rule-domain').value.trim().toLowerCase();
@@ -228,13 +220,13 @@ async function load(){
     ['Firewall (ufw)', d.services.ufw.status, 'ufw', 'ufw'],
     ['Internet', d.network.internet, 'internet', 'internet'],
   ];
-  document.getElementById('top').innerHTML = top.map(([k,v,kind,name]) => `<div class="card clickable" onclick="showDetails('${esc(kind)}','${esc(name)}','${esc(k)}')"><div class="title">${k}</div><div class="value ${cls(v)}">${text(v)}</div></div>`).join('');
+  document.getElementById('top').innerHTML = top.map(([k,v,kind,name]) => `<div class="card clickable" onclick="goDetail('${esc(kind)}','${esc(name)}','${esc(k)}')"><div class="title">${k}</div><div class="value ${cls(v)}">${text(v)}</div></div>`).join('');
 
   document.getElementById('fetchers').innerHTML = d.custom_fetchers.map(s =>
-    `<tr class="clickable" onclick="showDetails('service','${esc(s.name)}','Fetcher: ${esc(s.name)}')"><td>${s.name}</td><td class="${cls(s.active)}">${s.active}</td><td>${s.enabled}</td></tr>`).join('');
+    `<tr class="clickable" onclick="goDetail('service','${esc(s.name)}','Fetcher: ${esc(s.name)}')"><td>${s.name}</td><td class="${cls(s.active)}">${s.active}</td><td>${s.enabled}</td></tr>`).join('');
 
   document.getElementById('ifaces').innerHTML = d.network.interfaces.map(i =>
-    `<tr class="clickable" onclick="showDetails('interface','${esc(i.name)}','Interface: ${esc(i.name)}')"><td>${i.name}</td><td class="${cls(i.state)}">${i.state}</td><td>${i.ip || '-'}</td></tr>`).join('');
+    `<tr class="clickable" onclick="goDetail('interface','${esc(i.name)}','Interface: ${esc(i.name)}')"><td>${i.name}</td><td class="${cls(i.state)}">${i.state}</td><td>${i.ip || '-'}</td></tr>`).join('');
 
   document.getElementById('users').innerHTML = d.users.map(u =>
     `<tr><td>${esc(u.user)}</td><td>${esc(u.kind)}</td><td>${esc(u.source)}</td><td>${esc(u.status)}</td></tr>`
@@ -244,7 +236,7 @@ async function load(){
     `<tr><td>${esc(a.actor)}</td><td>${esc(a.resource)}</td><td>${esc(a.target)}</td><td>${esc(a.access)}</td></tr>`
   ).join('');
   document.getElementById('router').innerHTML = d.router_policy.connections.map(r =>
-    `<tr><td>${esc(r.remote)}</td><td>${esc(r.host)}</td><td class="${cls(r.policy)}">${esc(r.policy)}</td><td>${esc(r.interface)}</td></tr>`
+    `<tr class="clickable" onclick="goDetail('connection','${esc(r.remote)}','Router Peer: ${esc(r.host)}')"><td>${esc(r.remote)}</td><td>${esc(r.host)}</td><td class="${cls(r.policy)}">${esc(r.policy)}</td><td>${esc(r.interface)}</td></tr>`
   ).join('');
   const sm = d.router_policy.settings || {};
   document.getElementById('rules-file').textContent = sm.file || '-';
@@ -253,11 +245,52 @@ async function load(){
   document.getElementById('fw-policy').textContent = d.firewall_flow.policy;
   document.getElementById('fw-count').textContent = d.firewall_flow.total;
   document.getElementById('fwflows').innerHTML = d.firewall_flow.connections.map(c =>
-    `<tr class="clickable" onclick="showDetails('connection','${esc(c.local + '->' + c.remote)}','Connection: ${esc(c.remote)}')"><td>${c.scope}</td><td>${esc(c.owner)}</td><td>${esc(c.interface)}</td><td>${esc(c.local)}</td><td>${esc(c.remote)}</td><td class="${cls(c.permission)}">${esc(c.permission)}</td></tr>`
+    `<tr class="clickable" onclick="goDetail('connection','${esc(c.remote)}','Connection: ${esc(c.remote)}')"><td>${c.scope}</td><td>${esc(c.owner)}</td><td>${esc(c.interface)}</td><td>${esc(c.local)}</td><td>${esc(c.remote)}</td><td class="${cls(c.permission)}">${esc(c.permission)}</td></tr>`
   ).join('');
 }
 load();
 adminStatus();
+</script>
+</body>
+</html>
+"""
+
+DETAIL_TEMPLATE = """
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{{ label or 'Detail' }}</title>
+  <style>
+    body { margin:0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif; background:#0b1320; color:#e8eef9; }
+    .wrap { max-width: 1100px; margin: 20px auto; padding: 0 16px; }
+    .bar { display:flex; gap:10px; align-items:center; }
+    .btn { background:#22406b; color:#fff; border:0; border-radius:8px; padding:8px 12px; cursor:pointer; }
+    .muted { color:#9ab0d3; font-size: 13px; }
+    .card { background:#132038; border:1px solid #284267; border-radius:12px; padding:14px; margin-top:12px; }
+    pre { white-space:pre-wrap; margin:0; font-size:13px; color:#cfe0fb; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="bar">
+      <button class="btn" onclick="window.location.href='/'">Back</button>
+      <button class="btn" onclick="load()">Refresh</button>
+      <h2 style="margin:0;">{{ label or 'Detail' }}</h2>
+    </div>
+    <div class="muted">kind={{ kind }} | name={{ name }}</div>
+    <div class="card"><pre id="detail">Loading...</pre></div>
+  </div>
+<script>
+async function load(){
+  const url = `/api/details?kind={{ kind | urlencode }}&name={{ name | urlencode }}`;
+  const r = await fetch(url);
+  const d = await r.json();
+  document.getElementById('detail').textContent = d.details || 'No details';
+}
+load();
+setInterval(load, 10000);
 </script>
 </body>
 </html>
@@ -682,6 +715,14 @@ def index():
     return render_template_string(TEMPLATE, host=socket.gethostname(), allowed_file=allowed_domains_file())
 
 
+@app.route("/view")
+def view_page():
+    kind = request.args.get("kind", "service")
+    name = request.args.get("name", "")
+    label = request.args.get("label", "")
+    return render_template_string(DETAIL_TEMPLATE, kind=kind, name=name, label=label)
+
+
 @app.route("/api/status")
 def api_status():
     ssh = first_service_status(["ssh.service", "sshd.service"])
@@ -713,16 +754,20 @@ def api_details():
     name = request.args.get("name", "")
 
     if kind == "service":
-        details = run(f"systemctl status {name} --no-pager -n 20")
+        parts = []
+        parts.append("[Status]\n" + (run(f"systemctl status {name} --no-pager -n 20") or "No status output"))
+        parts.append("[Enabled]\n" + (run(f"systemctl is-enabled {name}", include_stderr=True) or "unknown"))
+        parts.append("[Recent Logs]\n" + (run(f"journalctl -u {name} -n 40 --no-pager") or "No logs"))
+        details = "\n\n".join(parts)
         if not details:
             details = f"No data for service: {name}"
         return jsonify({"details": details})
 
     if kind == "interface":
         details = []
-        details.append(run(f"ip addr show dev {name}"))
-        details.append(run(f"ip -s link show dev {name}"))
-        details.append(run(f"ip route | rg -n \"{name}\"") if shutil.which("rg") else run(f"ip route | grep -n \"{name}\""))
+        details.append("[Address]\n" + run(f"ip addr show dev {name}"))
+        details.append("[Stats]\n" + run(f"ip -s link show dev {name}"))
+        details.append("[Routes]\n" + (run(f"ip route | rg -n \"{name}\"") if shutil.which("rg") else run(f"ip route | grep -n \"{name}\"")))
         return jsonify({"details": "\n\n".join([d for d in details if d]) or f"No data for interface: {name}"})
 
     if kind == "ufw":
@@ -758,6 +803,22 @@ def api_details():
         chunks.append("$ smbstatus -S\n" + (run("smbstatus -S", include_stderr=True) or "No active SMB sessions"))
         chunks.append("$ smbstatus -L\n" + (run("smbstatus -L", include_stderr=True) or "No SMB locks"))
         return jsonify({"details": "\n\n".join(chunks)})
+
+    if kind == "connection":
+        target = name.strip()
+        cmds = [
+            f"ss -tunp | rg -n \"{target}\"" if shutil.which("rg") else f"ss -tunp | grep -n \"{target}\"",
+            "ss -tunp state established",
+            "ip route show",
+        ]
+        out = []
+        out.append("[Connection Match]")
+        out.append(run(cmds[0], include_stderr=True) or f"No direct matches for {target}")
+        out.append("\n[Established Snapshot]")
+        out.append(run(cmds[1], include_stderr=True) or "No established connections")
+        out.append("\n[Routing]")
+        out.append(run(cmds[2], include_stderr=True) or "No route output")
+        return jsonify({"details": "\n".join(out)})
 
     if kind == "internet":
         checks = [
