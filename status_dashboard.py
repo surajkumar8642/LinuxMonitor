@@ -98,6 +98,7 @@ TEMPLATE = """
       <div class="title"><span class="ico">%</span>Router URL Policy</div>
       <div style="margin-bottom:8px;" class="small">Allowed domains file: <span id="rules-file">{{ allowed_file }}</span></div>
       <div style="margin-bottom:8px;" class="small" id="rules-meta">-</div>
+      <div style="margin-bottom:8px;" class="small">Allowed domains: <span id="rules-domains">-</span></div>
       <div style="display:flex; gap:8px; margin-bottom:10px;">
         <input id="rule-domain" placeholder="example.com" style="flex:1; background:#0f1b30; color:#e8eef9; border:1px solid #284267; border-radius:8px; padding:8px;" />
         <button class="btn" style="margin-top:0;" onclick="ruleAdd()">Add</button>
@@ -241,6 +242,7 @@ async function load(){
   const sm = d.router_policy.settings || {};
   document.getElementById('rules-file').textContent = sm.file || '-';
   document.getElementById('rules-meta').textContent = `exists=${sm.exists} | rules=${sm.rules_count} | updated=${sm.updated_at || '-'}`;
+  document.getElementById('rules-domains').textContent = (d.router_policy.allowed_domains || []).join(', ') || 'none';
 
   document.getElementById('fw-policy').textContent = d.firewall_flow.policy;
   document.getElementById('fw-count').textContent = d.firewall_flow.total;
