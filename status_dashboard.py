@@ -89,7 +89,7 @@ TEMPLATE = """
     <div class="card" style="margin-top:14px;">
       <div class="title"><span class="ico">@</span>Access Matrix (Who Access What)</div>
       <table>
-        <thead><tr><th>User/Process</th><th>Resource</th><th>Path/Target</th><th>Access</th></tr></thead>
+        <thead><tr><th>User/Process</th><th>Resource</th><th>Path/Target</th><th>Network</th><th>Access</th></tr></thead>
         <tbody id="access"></tbody>
       </table>
     </div>
@@ -233,7 +233,7 @@ async function load(){
   ).join('');
 
   document.getElementById('access').innerHTML = d.access_matrix.map(a =>
-    `<tr><td>${esc(a.actor)}</td><td>${esc(a.resource)}</td><td>${esc(a.target)}</td><td>${esc(a.access)}</td></tr>`
+    `<tr><td>${esc(a.actor)}</td><td>${esc(a.resource)}</td><td>${esc(a.target)}</td><td>${esc(a.network || '-')}</td><td>${esc(a.access)}</td></tr>`
   ).join('');
   document.getElementById('router').innerHTML = d.router_policy.connections.map(r =>
     `<tr class="clickable" onclick="goDetail('connection','${esc(r.remote)}','Router Peer: ${esc(r.host)}')"><td>${esc(r.remote)}</td><td>${esc(r.host)}</td><td class="${cls(r.policy)}">${esc(r.policy)}</td><td>${esc(r.interface)}</td></tr>`
@@ -508,6 +508,24 @@ def parse_smb_shares():
     return shares
 
 
+def parse_smb_sessions():
+    out = run("smbstatus -p", include_stderr=True)
+    rows = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("smbstatus") or line.startswith("PID") or line.startswith("-"):
+            continue
+        parts = line.split()
+        if len(parts) >= 4 and parts[0].isdigit():
+            rows.append({
+                "pid": parts[0],
+                "user": parts[1],
+                "group": parts[2],
+                "machine": parts[3],
+            })
+    return rows
+
+
 def access_matrix():
     rows = []
     for c in firewall_flow()["connections"][:120]:
@@ -515,6 +533,7 @@ def access_matrix():
             "actor": c["owner"],
             "resource": "network",
             "target": c["remote"],
+            "network": c.get("interface", "-"),
             "access": c["permission"],
         })
     for s in parse_smb_shares():
@@ -522,10 +541,21 @@ def access_matrix():
             "actor": s["users"],
             "resource": f"smb-share:{s['share']}",
             "target": s["path"],
+            "network": "smb (configured)",
             "access": s["access"],
         })
+    for sess in parse_smb_sessions():
+        machine = sess["machine"].replace("(", "").replace(")", "")
+        iface = route_interface_for_ip(machine if ":" in machine else f"{machine}:445")
+        rows.append({
+            "actor": sess["user"],
+            "resource": "smb-session",
+            "target": machine,
+            "network": iface,
+            "access": "active-session",
+        })
     if not rows:
-        rows.append({"actor": "none", "resource": "none", "target": "-", "access": "no-data"})
+        rows.append({"actor": "none", "resource": "none", "target": "-", "network": "-", "access": "no-data"})
     return rows
 
 
