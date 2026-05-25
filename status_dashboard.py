@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-import json
+import os
 import shutil
 import socket
 import subprocess
 from datetime import datetime
-from pathlib import Path
 
 from flask import Flask, jsonify, render_template_string
+from flask import request
 
 app = Flask(__name__)
+os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Put your custom service names here.
 CUSTOM_FETCHERS = [
@@ -40,6 +41,8 @@ TEMPLATE = """
     p.sub { margin: 0 0 20px; color: var(--muted); }
     .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap: 14px; }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; }
+    .clickable { cursor: pointer; transition: border-color .15s ease; }
+    .clickable:hover { border-color: #4f79b8; }
     .title { font-size: 14px; color: var(--muted); margin-bottom: 8px; }
     .value { font-size: 18px; font-weight: 700; }
     .ok { color: var(--ok); }
@@ -47,6 +50,7 @@ TEMPLATE = """
     .bad { color: var(--bad); }
     table { width: 100%; border-collapse: collapse; }
     td, th { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: left; font-size: 14px; }
+    tr.clickable:hover { background: rgba(79, 121, 184, 0.16); }
     .btn { margin-top: 16px; background: #22406b; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
     .small { font-size: 12px; color: var(--muted); }
   </style>
@@ -76,29 +80,43 @@ TEMPLATE = """
 
     <button class="btn" onclick="load()">Refresh</button>
     <div class="small">API: /api/status</div>
+
+    <div class="card" style="margin-top:14px;">
+      <div class="title">Details (Click Any Item Above)</div>
+      <div id="detail-title" class="value">No item selected</div>
+      <pre id="detail-body" style="white-space:pre-wrap; margin:10px 0 0; color:var(--muted); font-size:13px;"></pre>
+    </div>
   </div>
 
 <script>
 function cls(v){ if(v==='active' || v==='running' || v===true) return 'ok'; if(v==='inactive' || v==='unknown') return 'warn'; return 'bad'; }
 function text(v){ return (v===true)?'yes':(v===false)?'no':String(v); }
+function esc(s){ return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\"','&quot;').replaceAll(\"'\",'&#39;'); }
+async function showDetails(kind, name, label){
+  const url = `/api/details?kind=${encodeURIComponent(kind)}&name=${encodeURIComponent(name || '')}`;
+  const r = await fetch(url);
+  const d = await r.json();
+  document.getElementById('detail-title').textContent = label;
+  document.getElementById('detail-body').textContent = d.details || 'No details';
+}
 async function load(){
   const r = await fetch('/api/status');
   const d = await r.json();
   document.getElementById('updated').textContent = d.timestamp;
 
   const top = [
-    ['SSH', d.services.ssh.active],
-    ['SMB', d.services.smb.active],
-    ['Firewall (ufw)', d.services.ufw.status],
-    ['Internet', d.network.internet],
+    ['SSH', d.services.ssh.active, 'service', d.services.ssh.name],
+    ['SMB', d.services.smb.active, 'smb', d.services.smb.name],
+    ['Firewall (ufw)', d.services.ufw.status, 'ufw', 'ufw'],
+    ['Internet', d.network.internet, 'internet', 'internet'],
   ];
-  document.getElementById('top').innerHTML = top.map(([k,v]) => `<div class="card"><div class="title">${k}</div><div class="value ${cls(v)}">${text(v)}</div></div>`).join('');
+  document.getElementById('top').innerHTML = top.map(([k,v,kind,name]) => `<div class="card clickable" onclick="showDetails('${esc(kind)}','${esc(name)}','${esc(k)}')"><div class="title">${k}</div><div class="value ${cls(v)}">${text(v)}</div></div>`).join('');
 
   document.getElementById('fetchers').innerHTML = d.custom_fetchers.map(s =>
-    `<tr><td>${s.name}</td><td class="${cls(s.active)}">${s.active}</td><td>${s.enabled}</td></tr>`).join('');
+    `<tr class="clickable" onclick="showDetails('service','${esc(s.name)}','Fetcher: ${esc(s.name)}')"><td>${s.name}</td><td class="${cls(s.active)}">${s.active}</td><td>${s.enabled}</td></tr>`).join('');
 
   document.getElementById('ifaces').innerHTML = d.network.interfaces.map(i =>
-    `<tr><td>${i.name}</td><td class="${cls(i.state)}">${i.state}</td><td>${i.ip || '-'}</td></tr>`).join('');
+    `<tr class="clickable" onclick="showDetails('interface','${esc(i.name)}','Interface: ${esc(i.name)}')"><td>${i.name}</td><td class="${cls(i.state)}">${i.state}</td><td>${i.ip || '-'}</td></tr>`).join('');
 }
 load();
 </script>
@@ -107,25 +125,45 @@ load();
 """
 
 
-def run(cmd):
-    p = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
-    return p.stdout.strip()
+def run(cmd, include_stderr=False):
+    p = subprocess.run(
+        cmd,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE if include_stderr else subprocess.DEVNULL,
+        text=True,
+    )
+    out = p.stdout.strip()
+    if include_stderr and p.stderr.strip():
+        out = (out + "\n" + p.stderr.strip()).strip()
+    return out
 
 
 def service_status(name):
+    if not service_exists(name):
+        return {"name": name, "active": "not-installed", "enabled": "not-installed"}
     active = run(f"systemctl is-active {name}") or "unknown"
     enabled = run(f"systemctl is-enabled {name}") or "unknown"
     return {"name": name, "active": active, "enabled": enabled}
+
+def service_exists(name):
+    return run(f"systemctl list-unit-files {name} --no-legend")
+
+def first_service_status(candidates):
+    for name in candidates:
+        if service_exists(name):
+            return service_status(name)
+    return {"name": candidates[0], "active": "not-installed", "enabled": "not-installed"}
 
 
 def ufw_status():
     if not shutil.which("ufw"):
         return "not-installed"
     out = run("ufw status | head -n1")
-    if "active" in out.lower():
-        return "active"
     if "inactive" in out.lower():
         return "inactive"
+    if "active" in out.lower():
+        return "active"
     return "unknown"
 
 
@@ -145,7 +183,8 @@ def interfaces():
         parts = line.split(": ", 2)
         if len(parts) >= 3:
             name = parts[1].split("@")[0]
-            state_map[name] = "UP" if " state UP " in line else "DOWN"
+            flags = parts[2].split(">")[0]
+            state_map[name] = "UP" if "UP" in flags else "DOWN"
     rows = []
     seen = set()
     for line in out.splitlines():
@@ -161,6 +200,24 @@ def interfaces():
     return sorted(rows, key=lambda x: x["name"])
 
 
+def local_ipv4_addresses():
+    return [row["ip"] for row in interfaces() if row["ip"]]
+
+
+def listening_ports():
+    out = run("ss -lntupH")
+    rows = []
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        proto = parts[0]
+        local = parts[4]
+        proc = " ".join(parts[6:]) if len(parts) > 6 else ""
+        rows.append({"proto": proto, "local": local, "process": proc})
+    return rows
+
+
 @app.route("/")
 def index():
     return render_template_string(TEMPLATE, host=socket.gethostname())
@@ -168,7 +225,7 @@ def index():
 
 @app.route("/api/status")
 def api_status():
-    ssh = service_status("ssh.service")
+    ssh = first_service_status(["ssh.service", "sshd.service"])
     smb = service_status("smbd.service")
     data = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -185,6 +242,78 @@ def api_status():
         },
     }
     return jsonify(data)
+
+
+@app.route("/api/details")
+def api_details():
+    kind = request.args.get("kind", "")
+    name = request.args.get("name", "")
+
+    if kind == "service":
+        details = run(f"systemctl status {name} --no-pager -n 20")
+        if not details:
+            details = f"No data for service: {name}"
+        return jsonify({"details": details})
+
+    if kind == "interface":
+        details = []
+        details.append(run(f"ip addr show dev {name}"))
+        details.append(run(f"ip -s link show dev {name}"))
+        details.append(run(f"ip route | rg -n \"{name}\"") if shutil.which("rg") else run(f"ip route | grep -n \"{name}\""))
+        return jsonify({"details": "\n\n".join([d for d in details if d]) or f"No data for interface: {name}"})
+
+    if kind == "ufw":
+        chunks = []
+        if shutil.which("ufw"):
+            chunks.append("$ ufw status verbose\n" + run("ufw status verbose", include_stderr=True))
+            chunks.append("$ ufw status numbered\n" + run("ufw status numbered", include_stderr=True))
+            chunks.append("$ ufw show raw\n" + run("ufw show raw", include_stderr=True))
+        else:
+            chunks.append("ufw not installed")
+        chunks.append("$ nft list ruleset\n" + (run("nft list ruleset", include_stderr=True) or "No nft output"))
+        chunks.append("$ iptables -S\n" + (run("iptables -S", include_stderr=True) or "No iptables output"))
+        ports = listening_ports()
+        chunks.append(f"Listening ports count: {len(ports)}")
+        chunks.append("\n".join([f"{p['proto']} {p['local']} {p['process']}" for p in ports[:50]]) or "No listening ports found")
+        chunks.append("$ ss -tunp state established\n" + (run("ss -tunp state established", include_stderr=True) or "No established connections"))
+        return jsonify({"details": "\n\n".join(chunks)})
+
+    if kind == "smb":
+        chunks = []
+        chunks.append("$ systemctl status smbd.service --no-pager -n 30\n" + (run("systemctl status smbd.service --no-pager -n 30", include_stderr=True) or "No output"))
+        chunks.append("$ testparm -s\n" + (run("testparm -s", include_stderr=True) or "testparm not available or no output"))
+        chunks.append("$ net usershare list\n" + (run("net usershare list", include_stderr=True) or "No usershares"))
+        usershares = run("net usershare list", include_stderr=False).splitlines()
+        if usershares:
+            details = []
+            for share in usershares:
+                share = share.strip()
+                if share:
+                    details.append(f"$ net usershare info '{share}'\n" + run(f"net usershare info '{share}'", include_stderr=True))
+            if details:
+                chunks.append("\n\n".join(details))
+        chunks.append("$ smbstatus -S\n" + (run("smbstatus -S", include_stderr=True) or "No active SMB sessions"))
+        chunks.append("$ smbstatus -L\n" + (run("smbstatus -L", include_stderr=True) or "No SMB locks"))
+        return jsonify({"details": "\n\n".join(chunks)})
+
+    if kind == "internet":
+        checks = [
+            "ping -c 2 1.1.1.1",
+            "ping -c 2 google.com",
+            "getent hosts google.com",
+            "ip route show default",
+        ]
+        out = []
+        out.append("Local IPv4:\n" + ("\n".join(local_ipv4_addresses()) or "No IPv4 found"))
+        ports = listening_ports()
+        out.append(f"Listening ports: {len(ports)}")
+        out.append("\n".join([f"{p['proto']} {p['local']} {p['process']}" for p in ports[:50]]) or "No listening ports found")
+        for c in checks:
+            out.append(f"$ {c}\n{run(c)}")
+        out.append("$ ss -tun state established | head -n 30\n" + run("ss -tun state established | head -n 30"))
+        return jsonify({"details": "\n\n".join(out)})
+
+    return jsonify({"details": "Unknown detail type"})
 
 
 if __name__ == "__main__":

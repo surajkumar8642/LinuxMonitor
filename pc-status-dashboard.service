@@ -7,7 +7,7 @@ Wants=network-online.target
 Type=simple
 User=comp5
 WorkingDirectory=/home/comp5/work/git/LinuxMonitor
-Environment=PATH=/home/comp5/work/git/LinuxMonitor/.venv/bin
+Environment=PATH=/home/comp5/work/git/LinuxMonitor/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/home/comp5/work/git/LinuxMonitor/.venv/bin/python /home/comp5/work/git/LinuxMonitor/status_dashboard.py
 Restart=always
 RestartSec=3
