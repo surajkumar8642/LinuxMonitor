@@ -5,12 +5,16 @@ import socket
 import subprocess
 import ipaddress
 from datetime import datetime
+from datetime import timedelta
 
 from flask import Flask, jsonify, render_template_string
 from flask import request
+from flask import session
 
 app = Flask(__name__)
 os.environ["PATH"] = os.environ.get("PATH", "") + ":/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+app.secret_key = os.environ.get("LINUXMONITOR_SECRET", "change-this-secret")
+app.permanent_session_lifetime = timedelta(minutes=10)
 
 # Put your custom service names here.
 CUSTOM_FETCHERS = [
@@ -18,6 +22,14 @@ CUSTOM_FETCHERS = [
     "fetcher-b.service",
 ]
 ALLOWED_DOMAINS_FILE = "/home/comp5/work/git/LinuxMonitor/allowed_domains.txt"
+ADMIN_ACTIONS = {
+    "restart_dashboard": "systemctl restart pc-status-dashboard",
+    "restart_ssh": "systemctl restart ssh",
+    "restart_smb": "systemctl restart smbd",
+    "ufw_reload": "ufw reload",
+    "ufw_enable": "ufw --force enable",
+    "ufw_disable": "ufw disable",
+}
 
 TEMPLATE = """
 <!doctype html>
@@ -99,6 +111,25 @@ TEMPLATE = """
     </div>
 
     <div class="card" style="margin-top:14px;">
+      <div class="title"><span class="ico">!</span>Admin (sudo in browser, auto logout)</div>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
+        <input id="sudo-pass" type="password" placeholder="sudo password" style="flex:1; background:#0f1b30; color:#e8eef9; border:1px solid #284267; border-radius:8px; padding:8px;" />
+        <button class="btn" style="margin-top:0;" onclick="adminLogin()">Login</button>
+        <button class="btn" style="margin-top:0;" onclick="adminLogout()">Logout</button>
+      </div>
+      <div id="admin-state" class="small">Admin: logged-out</div>
+      <div style="display:flex; flex-wrap:wrap; gap:8px; margin-top:10px;">
+        <button class="btn" style="margin-top:0;" onclick="adminRun('restart_dashboard')">Restart Dashboard</button>
+        <button class="btn" style="margin-top:0;" onclick="adminRun('restart_ssh')">Restart SSH</button>
+        <button class="btn" style="margin-top:0;" onclick="adminRun('restart_smb')">Restart SMB</button>
+        <button class="btn" style="margin-top:0;" onclick="adminRun('ufw_reload')">UFW Reload</button>
+        <button class="btn" style="margin-top:0;" onclick="adminRun('ufw_enable')">UFW Enable</button>
+        <button class="btn" style="margin-top:0;" onclick="adminRun('ufw_disable')">UFW Disable</button>
+      </div>
+      <pre id="admin-out" style="white-space:pre-wrap; margin:10px 0 0; color:var(--muted); font-size:13px;"></pre>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
       <div class="title">Custom Fetchers</div>
       <table>
         <thead><tr><th>Service</th><th>Status</th><th>Enabled</th></tr></thead>
@@ -160,6 +191,31 @@ async function changeRule(action){
 }
 async function ruleAdd(){ await changeRule('add'); }
 async function ruleRemove(){ await changeRule('remove'); }
+async function adminStatus(){
+  const r = await fetch('/api/admin/status');
+  const d = await r.json();
+  document.getElementById('admin-state').textContent = d.active ? `Admin: logged-in (expires ${d.expires_in}s)` : 'Admin: logged-out';
+}
+async function adminLogin(){
+  const password = document.getElementById('sudo-pass').value;
+  const r = await fetch('/api/admin/login', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({password})});
+  const d = await r.json();
+  document.getElementById('admin-out').textContent = d.message || '';
+  await adminStatus();
+}
+async function adminLogout(){
+  const r = await fetch('/api/admin/logout', {method:'POST'});
+  const d = await r.json();
+  document.getElementById('admin-out').textContent = d.message || '';
+  await adminStatus();
+}
+async function adminRun(action){
+  const r = await fetch('/api/admin/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action})});
+  const d = await r.json();
+  document.getElementById('admin-out').textContent = d.output || d.message || '';
+  await adminStatus();
+  await load();
+}
 async function load(){
   const r = await fetch('/api/status');
   const d = await r.json();
@@ -197,6 +253,7 @@ async function load(){
   ).join('');
 }
 load();
+adminStatus();
 </script>
 </body>
 </html>
@@ -215,6 +272,11 @@ def run(cmd, include_stderr=False):
     if include_stderr and p.stderr.strip():
         out = (out + "\n" + p.stderr.strip()).strip()
     return out
+
+
+def run_with_rc(cmd):
+    p = subprocess.run(cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return p.returncode, p.stdout.strip(), p.stderr.strip()
 
 
 def service_status(name):
@@ -484,6 +546,20 @@ def router_policy():
     return {"allowed_domains": allowed, "connections": rows[:120]}
 
 
+def admin_active():
+    exp = session.get("admin_exp")
+    if not exp:
+        return False
+    return datetime.now().timestamp() < exp
+
+
+def require_admin():
+    if not admin_active():
+        return jsonify({"ok": False, "message": "Admin login required"}), 403
+    session["admin_exp"] = (datetime.now() + timedelta(minutes=10)).timestamp()
+    return None
+
+
 @app.route("/api/router/rules", methods=["POST"])
 def router_rules():
     payload = request.get_json(silent=True) or {}
@@ -507,6 +583,55 @@ def router_rules():
         return jsonify({"ok": True, "message": f"Removed: {domain}", "domains": load_allowed_domains()})
 
     return jsonify({"ok": False, "message": "Unsupported action"}), 400
+
+
+@app.route("/api/admin/status")
+def admin_status():
+    active = admin_active()
+    left = 0
+    if active:
+        left = int(session.get("admin_exp", 0) - datetime.now().timestamp())
+    return jsonify({"active": active, "expires_in": max(0, left)})
+
+
+@app.route("/api/admin/login", methods=["POST"])
+def admin_login():
+    payload = request.get_json(silent=True) or {}
+    password = payload.get("password", "")
+    if not password:
+        return jsonify({"ok": False, "message": "Password required"}), 400
+    p = subprocess.run(
+        ["sudo", "-S", "-k", "-v"],
+        input=password + "\n",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    if p.returncode != 0:
+        return jsonify({"ok": False, "message": "sudo auth failed", "output": (p.stdout + "\n" + p.stderr).strip()}), 403
+    session.permanent = True
+    session["admin_exp"] = (datetime.now() + timedelta(minutes=10)).timestamp()
+    return jsonify({"ok": True, "message": "Admin login success. Auto logout: 10 minutes inactivity."})
+
+
+@app.route("/api/admin/logout", methods=["POST"])
+def admin_logout():
+    session.pop("admin_exp", None)
+    return jsonify({"ok": True, "message": "Admin logged out"})
+
+
+@app.route("/api/admin/run", methods=["POST"])
+def admin_run():
+    guard = require_admin()
+    if guard:
+        return guard
+    payload = request.get_json(silent=True) or {}
+    action = (payload.get("action") or "").strip()
+    cmd = ADMIN_ACTIONS.get(action)
+    if not cmd:
+        return jsonify({"ok": False, "message": "Unsupported admin action"}), 400
+    rc, out, err = run_with_rc(f"sudo -n {cmd}")
+    return jsonify({"ok": rc == 0, "message": "done" if rc == 0 else "failed", "output": (out + "\n" + err).strip()})
 
 
 def firewall_flow():
