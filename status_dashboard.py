@@ -21,7 +21,7 @@ CUSTOM_FETCHERS = [
     "fetcher-a.service",
     "fetcher-b.service",
 ]
-ALLOWED_DOMAINS_FILE = "/home/comp5/work/git/LinuxMonitor/allowed_domains.txt"
+DEFAULT_ALLOWED_DOMAINS_FILE = "/home/comp5/work/git/LinuxMonitor/allowed_domains.txt"
 ADMIN_ACTIONS = {
     "restart_dashboard": "systemctl restart pc-status-dashboard",
     "restart_ssh": "systemctl restart ssh",
@@ -96,7 +96,8 @@ TEMPLATE = """
 
     <div class="card" style="margin-top:14px;">
       <div class="title"><span class="ico">%</span>Router URL Policy</div>
-      <div style="margin-bottom:8px;" class="small">Allowed domains file: `/home/comp5/work/git/LinuxMonitor/allowed_domains.txt`</div>
+      <div style="margin-bottom:8px;" class="small">Allowed domains file: <span id="rules-file">{{ allowed_file }}</span></div>
+      <div style="margin-bottom:8px;" class="small" id="rules-meta">-</div>
       <div style="display:flex; gap:8px; margin-bottom:10px;">
         <input id="rule-domain" placeholder="example.com" style="flex:1; background:#0f1b30; color:#e8eef9; border:1px solid #284267; border-radius:8px; padding:8px;" />
         <button class="btn" style="margin-top:0;" onclick="ruleAdd()">Add</button>
@@ -245,6 +246,9 @@ async function load(){
   document.getElementById('router').innerHTML = d.router_policy.connections.map(r =>
     `<tr><td>${esc(r.remote)}</td><td>${esc(r.host)}</td><td class="${cls(r.policy)}">${esc(r.policy)}</td><td>${esc(r.interface)}</td></tr>`
   ).join('');
+  const sm = d.router_policy.settings || {};
+  document.getElementById('rules-file').textContent = sm.file || '-';
+  document.getElementById('rules-meta').textContent = `exists=${sm.exists} | rules=${sm.rules_count} | updated=${sm.updated_at || '-'}`;
 
   document.getElementById('fw-policy').textContent = d.firewall_flow.policy;
   document.getElementById('fw-count').textContent = d.firewall_flow.total;
@@ -272,6 +276,10 @@ def run(cmd, include_stderr=False):
     if include_stderr and p.stderr.strip():
         out = (out + "\n" + p.stderr.strip()).strip()
     return out
+
+
+def allowed_domains_file():
+    return os.environ.get("LINUXMONITOR_ALLOWED_DOMAINS_FILE", DEFAULT_ALLOWED_DOMAINS_FILE)
 
 
 def run_with_rc(cmd):
@@ -489,7 +497,7 @@ def access_matrix():
 
 
 def load_allowed_domains():
-    path = ALLOWED_DOMAINS_FILE
+    path = allowed_domains_file()
     if not os.path.exists(path):
         return []
     domains = []
@@ -504,7 +512,7 @@ def load_allowed_domains():
 
 def save_allowed_domains(domains):
     uniq = sorted(set([d.strip().lower() for d in domains if d.strip()]))
-    with open(ALLOWED_DOMAINS_FILE, "w", encoding="utf-8") as f:
+    with open(allowed_domains_file(), "w", encoding="utf-8") as f:
         f.write("# One domain per line\n")
         for d in uniq:
             f.write(d + "\n")
@@ -529,6 +537,11 @@ def host_allowed(host, allowed):
 
 def router_policy():
     allowed = load_allowed_domains()
+    fpath = allowed_domains_file()
+    exists = os.path.exists(fpath)
+    updated_at = None
+    if exists:
+        updated_at = datetime.fromtimestamp(os.path.getmtime(fpath)).strftime("%Y-%m-%d %H:%M:%S")
     rows = []
     for c in firewall_flow()["connections"]:
         if c["scope"] != "external":
@@ -543,7 +556,16 @@ def router_policy():
             "policy": policy,
             "interface": c["interface"],
         })
-    return {"allowed_domains": allowed, "connections": rows[:120]}
+    return {
+        "allowed_domains": allowed,
+        "connections": rows[:120],
+        "settings": {
+            "file": fpath,
+            "exists": exists,
+            "rules_count": len(allowed),
+            "updated_at": updated_at,
+        },
+    }
 
 
 def admin_active():
@@ -657,7 +679,7 @@ def firewall_flow():
 
 @app.route("/")
 def index():
-    return render_template_string(TEMPLATE, host=socket.gethostname())
+    return render_template_string(TEMPLATE, host=socket.gethostname(), allowed_file=allowed_domains_file())
 
 
 @app.route("/api/status")
