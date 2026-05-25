@@ -3,7 +3,7 @@
 ## Install (manual)
 
 ```bash
-cd /home/comp5/work/git/LinixMoniter
+cd /home/comp5/work/git/LinuxMonitor
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -29,7 +29,7 @@ Each fetcher should be a `systemd` service for accurate active/enabled status.
 ## Run as live service (auto-start)
 
 ```bash
-cd /home/comp5/work/git/LinixMoniter
+cd /home/comp5/work/git/LinuxMonitor
 ./install_live.sh
 ```
 

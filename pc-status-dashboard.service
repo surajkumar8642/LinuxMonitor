@@ -6,9 +6,9 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=comp5
-WorkingDirectory=/home/comp5/work/git/LinixMoniter
-Environment=PATH=/home/comp5/work/git/LinixMoniter/.venv/bin
-ExecStart=/home/comp5/work/git/LinixMoniter/.venv/bin/python /home/comp5/work/git/LinixMoniter/status_dashboard.py
+WorkingDirectory=/home/comp5/work/git/LinuxMonitor
+Environment=PATH=/home/comp5/work/git/LinuxMonitor/.venv/bin
+ExecStart=/home/comp5/work/git/LinuxMonitor/.venv/bin/python /home/comp5/work/git/LinuxMonitor/status_dashboard.py
 Restart=always
 RestartSec=3
 
