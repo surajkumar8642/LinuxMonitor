@@ -222,9 +222,7 @@ async function adminRun(action){
   await adminStatus();
   await load();
 }
-async function load(){
-  const r = await fetch('/api/status');
-  const d = await r.json();
+function renderStatus(d){
   document.getElementById('updated').textContent = d.timestamp;
 
   const top = [
@@ -268,6 +266,29 @@ async function load(){
     `<tr class="clickable" onclick="goDetail('connection','${esc(c.remote)}','Connection: ${esc(c.remote)}')"><td>${c.scope}</td><td>${esc(c.owner)}</td><td>${esc(c.interface)}</td><td>${esc(c.local)}</td><td>${esc(c.remote)}</td><td class="${cls(c.permission)}">${esc(c.permission)}</td></tr>`
   ).join('');
 }
+function loadCached(){
+  try {
+    const raw = localStorage.getItem('pc_status_cache_v1');
+    if (!raw) return false;
+    const d = JSON.parse(raw);
+    if (!d || !d.timestamp) return false;
+    renderStatus(d);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+async function load(){
+  try {
+    const r = await fetch('/api/status', {cache: 'no-store'});
+    const d = await r.json();
+    renderStatus(d);
+    try { localStorage.setItem('pc_status_cache_v1', JSON.stringify(d)); } catch (e) {}
+  } catch (e) {
+    // Keep cached data visible when network/API refresh fails.
+  }
+}
+loadCached();
 load();
 adminStatus();
 </script>
