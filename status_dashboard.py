@@ -161,6 +161,10 @@ TEMPLATE = """
         <span class="chip">Policy: <span id="fw-policy">-</span></span>
         <span class="chip">Active Connections: <span id="fw-count">0</span></span>
       </div>
+      <table style="margin-bottom:10px;">
+        <thead><tr><th>LAN IF</th><th>Inbound</th><th>Outbound</th><th>Custom Rules</th><th>Listening Ports</th><th>Outbound Active</th></tr></thead>
+        <tbody id="fwif"></tbody>
+      </table>
       <table>
         <thead><tr><th>Type</th><th>User/Process</th><th>LAN IF</th><th>Local</th><th>Remote</th><th>Permission</th></tr></thead>
         <tbody id="fwflows"></tbody>
@@ -257,6 +261,9 @@ async function load(){
 
   document.getElementById('fw-policy').textContent = d.firewall_flow.policy;
   document.getElementById('fw-count').textContent = d.firewall_flow.total;
+  document.getElementById('fwif').innerHTML = (d.firewall_flow.interfaces || []).map(i =>
+    `<tr><td>${esc(i.interface)}</td><td>${esc(i.inbound)}</td><td>${esc(i.outbound)}</td><td>${esc(String(i.custom_rules))}</td><td>${esc(String(i.listening_ports))}</td><td>${esc(String(i.outbound_active))}</td></tr>`
+  ).join('');
   document.getElementById('fwflows').innerHTML = d.firewall_flow.connections.map(c =>
     `<tr class="clickable" onclick="goDetail('connection','${esc(c.remote)}','Connection: ${esc(c.remote)}')"><td>${c.scope}</td><td>${esc(c.owner)}</td><td>${esc(c.interface)}</td><td>${esc(c.local)}</td><td>${esc(c.remote)}</td><td class="${cls(c.permission)}">${esc(c.permission)}</td></tr>`
   ).join('');
@@ -465,6 +472,98 @@ def firewall_policy_label():
     if st == "not-installed":
         return "not-installed"
     return "unknown"
+
+
+def ufw_default_policies():
+    out = run("ufw status verbose", include_stderr=True)
+    low = out.lower()
+    if "need to be root" in low or "permission denied" in low:
+        return "needs-admin", "needs-admin"
+    inbound, outbound = "unknown", "unknown"
+    for line in out.splitlines():
+        l = line.strip().lower()
+        if l.startswith("default:"):
+            if "deny (incoming)" in l:
+                inbound = "deny"
+            elif "allow (incoming)" in l:
+                inbound = "allow"
+            if "allow (outgoing)" in l:
+                outbound = "allow"
+            elif "deny (outgoing)" in l:
+                outbound = "deny"
+    return inbound, outbound
+
+
+def interface_rule_counts():
+    rows = {}
+    out = run("ufw status numbered", include_stderr=True)
+    low = out.lower()
+    if "need to be root" in low or "permission denied" in low:
+        return {}, "needs-admin"
+    for line in out.splitlines():
+        ll = line.lower()
+        if " on " not in ll:
+            continue
+        # Example: "... ALLOW IN ... on enp1s0"
+        iface = line.rsplit(" on ", 1)[-1].strip()
+        if iface:
+            rows[iface] = rows.get(iface, 0) + 1
+    return rows, "ok"
+
+
+def listening_ports_by_interface():
+    local_map = interface_local_ips_map()
+    ip_to_iface = {}
+    for iface, ips in local_map.items():
+        for ip in ips:
+            ip_to_iface[ip.split("/")[0]] = iface
+    counts = {}
+    for p in listening_ports():
+        local = p["local"]
+        host = local.rsplit(":", 1)[0].strip("[]")
+        iface = None
+        if "%" in host:
+            host, iface_tag = host.split("%", 1)
+            iface = iface_tag
+        if not iface:
+            iface = ip_to_iface.get(host)
+        if not iface and host in ("0.0.0.0", "::"):
+            for i in local_map.keys():
+                if i != "lo":
+                    counts[i] = counts.get(i, 0) + 1
+            continue
+        if iface:
+            counts[iface] = counts.get(iface, 0) + 1
+    return counts
+
+
+def outbound_counts_by_interface(conns):
+    rows = {}
+    for c in conns:
+        iface = c.get("interface") or "unknown"
+        rows[iface] = rows.get(iface, 0) + 1
+    return rows
+
+
+def firewall_interface_matrix(conns):
+    in_def, out_def = ufw_default_policies()
+    rule_counts, rule_state = interface_rule_counts()
+    listen_counts = listening_ports_by_interface()
+    out_counts = outbound_counts_by_interface(conns)
+    ifaces = sorted(set(list(interface_local_ips_map().keys()) + list(listen_counts.keys()) + list(out_counts.keys())))
+    rows = []
+    for iface in ifaces:
+        if iface == "lo":
+            continue
+        rows.append({
+            "interface": iface,
+            "inbound": in_def,
+            "outbound": out_def,
+            "custom_rules": rule_counts.get(iface, 0) if rule_state == "ok" else "needs-admin",
+            "listening_ports": listen_counts.get(iface, 0),
+            "outbound_active": out_counts.get(iface, 0),
+        })
+    return rows
 
 
 def parse_ss_established():
@@ -793,6 +892,7 @@ def firewall_flow():
     return {
         "policy": firewall_policy_label(),
         "total": len(rows),
+        "interfaces": firewall_interface_matrix(rows),
         "connections": rows[:120],
     }
 
