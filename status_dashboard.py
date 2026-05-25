@@ -17,6 +17,7 @@ CUSTOM_FETCHERS = [
     "fetcher-a.service",
     "fetcher-b.service",
 ]
+ALLOWED_DOMAINS_FILE = "/home/comp5/work/git/LinuxMonitor/allowed_domains.txt"
 
 TEMPLATE = """
 <!doctype html>
@@ -82,6 +83,22 @@ TEMPLATE = """
     </div>
 
     <div class="card" style="margin-top:14px;">
+      <div class="title"><span class="ico">%</span>Router URL Policy</div>
+      <div style="margin-bottom:8px;" class="small">Allowed domains file: `/home/comp5/work/git/LinuxMonitor/allowed_domains.txt`</div>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
+        <input id="rule-domain" placeholder="example.com" style="flex:1; background:#0f1b30; color:#e8eef9; border:1px solid #284267; border-radius:8px; padding:8px;" />
+        <button class="btn" style="margin-top:0;" onclick="ruleAdd()">Add</button>
+        <button class="btn" style="margin-top:0;" onclick="ruleRemove()">Remove</button>
+        <button class="btn" style="margin-top:0;" onclick="load()">Refresh</button>
+      </div>
+      <div id="rule-msg" class="small"></div>
+      <table>
+        <thead><tr><th>Remote</th><th>Resolved Host</th><th>Policy</th><th>Route IF</th></tr></thead>
+        <tbody id="router"></tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
       <div class="title">Custom Fetchers</div>
       <table>
         <thead><tr><th>Service</th><th>Status</th><th>Enabled</th></tr></thead>
@@ -130,6 +147,19 @@ async function showDetails(kind, name, label){
   document.getElementById('detail-title').textContent = label;
   document.getElementById('detail-body').textContent = d.details || 'No details';
 }
+async function changeRule(action){
+  const domain = document.getElementById('rule-domain').value.trim().toLowerCase();
+  const r = await fetch('/api/router/rules', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({action, domain})
+  });
+  const d = await r.json();
+  document.getElementById('rule-msg').textContent = d.message || 'done';
+  await load();
+}
+async function ruleAdd(){ await changeRule('add'); }
+async function ruleRemove(){ await changeRule('remove'); }
 async function load(){
   const r = await fetch('/api/status');
   const d = await r.json();
@@ -155,6 +185,9 @@ async function load(){
 
   document.getElementById('access').innerHTML = d.access_matrix.map(a =>
     `<tr><td>${esc(a.actor)}</td><td>${esc(a.resource)}</td><td>${esc(a.target)}</td><td>${esc(a.access)}</td></tr>`
+  ).join('');
+  document.getElementById('router').innerHTML = d.router_policy.connections.map(r =>
+    `<tr><td>${esc(r.remote)}</td><td>${esc(r.host)}</td><td class="${cls(r.policy)}">${esc(r.policy)}</td><td>${esc(r.interface)}</td></tr>`
   ).join('');
 
   document.getElementById('fw-policy').textContent = d.firewall_flow.policy;
@@ -393,6 +426,89 @@ def access_matrix():
     return rows
 
 
+def load_allowed_domains():
+    path = ALLOWED_DOMAINS_FILE
+    if not os.path.exists(path):
+        return []
+    domains = []
+    with open(path, "r", encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip().lower()
+            if not line or line.startswith("#"):
+                continue
+            domains.append(line)
+    return domains
+
+
+def save_allowed_domains(domains):
+    uniq = sorted(set([d.strip().lower() for d in domains if d.strip()]))
+    with open(ALLOWED_DOMAINS_FILE, "w", encoding="utf-8") as f:
+        f.write("# One domain per line\n")
+        for d in uniq:
+            f.write(d + "\n")
+
+
+def reverse_host(ip_or_host):
+    host = ip_or_host.rsplit(":", 1)[0].strip("[]")
+    out = run(f"getent hosts {host}")
+    if not out:
+        return host
+    parts = out.split()
+    return parts[1] if len(parts) > 1 else host
+
+
+def host_allowed(host, allowed):
+    h = host.lower()
+    for d in allowed:
+        if h == d or h.endswith("." + d):
+            return True
+    return False
+
+
+def router_policy():
+    allowed = load_allowed_domains()
+    rows = []
+    for c in firewall_flow()["connections"]:
+        if c["scope"] != "external":
+            continue
+        host = reverse_host(c["remote"])
+        policy = "allowed" if allowed and host_allowed(host, allowed) else "not-in-allowlist"
+        if not allowed:
+            policy = "no-allowlist-configured"
+        rows.append({
+            "remote": c["remote"],
+            "host": host,
+            "policy": policy,
+            "interface": c["interface"],
+        })
+    return {"allowed_domains": allowed, "connections": rows[:120]}
+
+
+@app.route("/api/router/rules", methods=["POST"])
+def router_rules():
+    payload = request.get_json(silent=True) or {}
+    action = (payload.get("action") or "").strip().lower()
+    domain = (payload.get("domain") or "").strip().lower()
+
+    if action == "refresh":
+        return jsonify({"ok": True, "message": "Rules refreshed", "domains": load_allowed_domains()})
+
+    if not domain or "." not in domain:
+        return jsonify({"ok": False, "message": "Provide valid domain, e.g. example.com"}), 400
+
+    domains = load_allowed_domains()
+    if action == "add":
+        domains.append(domain)
+        save_allowed_domains(domains)
+        return jsonify({"ok": True, "message": f"Added: {domain}", "domains": load_allowed_domains()})
+    if action == "remove":
+        domains = [d for d in domains if d != domain]
+        save_allowed_domains(domains)
+        return jsonify({"ok": True, "message": f"Removed: {domain}", "domains": load_allowed_domains()})
+
+    return jsonify({"ok": False, "message": "Unsupported action"}), 400
+
+
 def firewall_flow():
     conns = parse_ss_established()
     rows = []
@@ -439,6 +555,7 @@ def api_status():
         "firewall_flow": firewall_flow(),
         "users": current_users(),
         "access_matrix": access_matrix(),
+        "router_policy": router_policy(),
     }
     return jsonify(data)
 
