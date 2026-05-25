@@ -148,6 +148,14 @@ TEMPLATE = """
     </div>
 
     <div class="card" style="margin-top:14px;">
+      <div class="title"><span class="ico">~</span>Connected PCs By Interface</div>
+      <table>
+        <thead><tr><th>Interface</th><th>This PC IPs</th><th>Connected PCs</th><th>Client IPs</th></tr></thead>
+        <tbody id="lan-peers"></tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
       <div class="title"><span class="ico">*</span>Firewall Flow (Local/Internal vs External)</div>
       <div style="margin-bottom:8px;">
         <span class="chip">Policy: <span id="fw-policy">-</span></span>
@@ -228,6 +236,9 @@ async function load(){
 
   document.getElementById('ifaces').innerHTML = d.network.interfaces.map(i =>
     `<tr class="clickable" onclick="goDetail('interface','${esc(i.name)}','Interface: ${esc(i.name)}')"><td>${i.name}</td><td class="${cls(i.state)}">${i.state}</td><td>${i.ip || '-'}</td></tr>`).join('');
+  document.getElementById('lan-peers').innerHTML = (d.network.peer_summary || []).map(p =>
+    `<tr><td>${esc(p.interface)}</td><td>${esc((p.local_ips || []).join(', ') || '-')}</td><td>${esc(String(p.connected_count || 0))}</td><td>${esc((p.client_ips || []).join(', ') || '-')}</td></tr>`
+  ).join('');
 
   document.getElementById('users').innerHTML = d.users.map(u =>
     `<tr><td>${esc(u.user)}</td><td>${esc(u.kind)}</td><td>${esc(u.source)}</td><td>${esc(u.status)}</td></tr>`
@@ -385,6 +396,50 @@ def interfaces():
 
 def local_ipv4_addresses():
     return [row["ip"] for row in interfaces() if row["ip"]]
+
+
+def interface_local_ips_map():
+    out = run("ip -o -4 addr show")
+    mp = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 4:
+            iface = parts[1]
+            ip = parts[3]
+            mp.setdefault(iface, []).append(ip)
+    return mp
+
+
+def peer_summary():
+    local_map = interface_local_ips_map()
+    neigh = run("ip neigh show")
+    peers = {}
+    for line in neigh.splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        ip = parts[0]
+        if "dev" not in parts:
+            continue
+        di = parts.index("dev")
+        iface = parts[di + 1] if di + 1 < len(parts) else ""
+        state = parts[-1]
+        if iface == "lo" or state.upper() in ("FAILED", "INCOMPLETE"):
+            continue
+        peers.setdefault(iface, set()).add(ip)
+
+    rows = []
+    for iface in sorted(set(list(local_map.keys()) + list(peers.keys()))):
+        if iface == "lo":
+            continue
+        client_ips = sorted(peers.get(iface, set()))
+        rows.append({
+            "interface": iface,
+            "local_ips": local_map.get(iface, []),
+            "connected_count": len(client_ips),
+            "client_ips": client_ips,
+        })
+    return rows
 
 
 def listening_ports():
@@ -771,6 +826,7 @@ def api_status():
         "network": {
             "internet": internet_ok(),
             "interfaces": interfaces(),
+            "peer_summary": peer_summary(),
         },
         "firewall_flow": firewall_flow(),
         "users": current_users(),
