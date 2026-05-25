@@ -3,6 +3,7 @@ import os
 import shutil
 import socket
 import subprocess
+import ipaddress
 from datetime import datetime
 
 from flask import Flask, jsonify, render_template_string
@@ -53,6 +54,7 @@ TEMPLATE = """
     tr.clickable:hover { background: rgba(79, 121, 184, 0.16); }
     .btn { margin-top: 16px; background: #22406b; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
     .small { font-size: 12px; color: var(--muted); }
+    .chip { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid var(--line); font-size:12px; margin-right:6px; }
   </style>
 </head>
 <body>
@@ -75,6 +77,18 @@ TEMPLATE = """
       <table>
         <thead><tr><th>Interface</th><th>State</th><th>IP</th></tr></thead>
         <tbody id="ifaces"></tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
+      <div class="title">Firewall Flow (Local/Internal vs External)</div>
+      <div style="margin-bottom:8px;">
+        <span class="chip">Policy: <span id="fw-policy">-</span></span>
+        <span class="chip">Active Connections: <span id="fw-count">0</span></span>
+      </div>
+      <table>
+        <thead><tr><th>Type</th><th>User/Process</th><th>Local</th><th>Remote</th><th>Permission</th></tr></thead>
+        <tbody id="fwflows"></tbody>
       </table>
     </div>
 
@@ -117,6 +131,12 @@ async function load(){
 
   document.getElementById('ifaces').innerHTML = d.network.interfaces.map(i =>
     `<tr class="clickable" onclick="showDetails('interface','${esc(i.name)}','Interface: ${esc(i.name)}')"><td>${i.name}</td><td class="${cls(i.state)}">${i.state}</td><td>${i.ip || '-'}</td></tr>`).join('');
+
+  document.getElementById('fw-policy').textContent = d.firewall_flow.policy;
+  document.getElementById('fw-count').textContent = d.firewall_flow.total;
+  document.getElementById('fwflows').innerHTML = d.firewall_flow.connections.map(c =>
+    `<tr class="clickable" onclick="showDetails('connection','${esc(c.local + '->' + c.remote)}','Connection: ${esc(c.remote)}')"><td>${c.scope}</td><td>${esc(c.owner)}</td><td>${esc(c.local)}</td><td>${esc(c.remote)}</td><td class="${cls(c.permission)}">${esc(c.permission)}</td></tr>`
+  ).join('');
 }
 load();
 </script>
@@ -218,6 +238,80 @@ def listening_ports():
     return rows
 
 
+def firewall_policy_label():
+    st = ufw_status()
+    if st == "active":
+        return "enforced"
+    if st == "inactive":
+        return "not-enforced"
+    if st == "not-installed":
+        return "not-installed"
+    return "unknown"
+
+
+def parse_ss_established():
+    out = run("ss -tunpH state established", include_stderr=True)
+    rows = []
+    for line in out.splitlines():
+        if not line or line.startswith("Netid"):
+            continue
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        proto = parts[0]
+        local = parts[3]
+        remote = parts[4]
+        proc = " ".join(parts[5:]) if len(parts) > 5 else ""
+        rows.append({"proto": proto, "local": local, "remote": remote, "proc": proc})
+    return rows
+
+
+def scope_for_remote(remote):
+    host = remote.rsplit(":", 1)[0].strip("[]")
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_loopback or ip.is_private or ip.is_link_local:
+            return "local/internal"
+        return "external"
+    except ValueError:
+        return "external"
+
+
+def permission_hint(scope):
+    policy = firewall_policy_label()
+    if policy == "enforced":
+        return "allowed-by-rules"
+    if policy in ("not-enforced", "not-installed"):
+        return "allowed-unrestricted"
+    return "unknown"
+
+
+def connection_owner(proc):
+    if not proc:
+        return "unresolved"
+    return proc.replace('users:(("', "").replace('"))', "")
+
+
+def firewall_flow():
+    conns = parse_ss_established()
+    rows = []
+    for c in conns:
+        scope = scope_for_remote(c["remote"])
+        rows.append({
+            "scope": scope,
+            "owner": connection_owner(c["proc"]),
+            "local": c["local"],
+            "remote": c["remote"],
+            "permission": permission_hint(scope),
+        })
+    rows.sort(key=lambda x: (0 if x["scope"] == "external" else 1, x["remote"]))
+    return {
+        "policy": firewall_policy_label(),
+        "total": len(rows),
+        "connections": rows[:120],
+    }
+
+
 @app.route("/")
 def index():
     return render_template_string(TEMPLATE, host=socket.gethostname())
@@ -240,6 +334,7 @@ def api_status():
             "internet": internet_ok(),
             "interfaces": interfaces(),
         },
+        "firewall_flow": firewall_flow(),
     }
     return jsonify(data)
 
