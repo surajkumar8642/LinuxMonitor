@@ -1,9 +1,9 @@
 # PC Status Dashboard (Ubuntu)
 
-## Install
+## Install (manual)
 
 ```bash
-cd /home/comp5/pc-status-dashboard
+cd /home/comp5/work/git/LinixMoniter
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -29,7 +29,7 @@ Each fetcher should be a `systemd` service for accurate active/enabled status.
 ## Run as live service (auto-start)
 
 ```bash
-cd /home/comp5/pc-status-dashboard
+cd /home/comp5/work/git/LinixMoniter
 ./install_live.sh
 ```
 

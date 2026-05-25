@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /home/comp5/pc-status-dashboard
+APP_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$APP_DIR"
+
+sudo apt-get update
+sudo apt-get install -y python3-venv
+
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
