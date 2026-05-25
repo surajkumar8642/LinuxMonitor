@@ -55,6 +55,7 @@ TEMPLATE = """
     .btn { margin-top: 16px; background: #22406b; color: #fff; border: 0; border-radius: 8px; padding: 8px 12px; cursor: pointer; }
     .small { font-size: 12px; color: var(--muted); }
     .chip { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid var(--line); font-size:12px; margin-right:6px; }
+    .ico { display:inline-block; width:18px; text-align:center; margin-right:6px; color:#7fb0ff; }
   </style>
 </head>
 <body>
@@ -63,6 +64,22 @@ TEMPLATE = """
     <p class="sub">Host: {{ host }} | Last update: <span id="updated"></span></p>
 
     <div class="grid" id="top"></div>
+
+    <div class="card" style="margin-top:14px;">
+      <div class="title"><span class="ico">#</span>User Insights</div>
+      <table>
+        <thead><tr><th>User</th><th>Type</th><th>Source</th><th>Status</th></tr></thead>
+        <tbody id="users"></tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
+      <div class="title"><span class="ico">@</span>Access Matrix (Who Access What)</div>
+      <table>
+        <thead><tr><th>User/Process</th><th>Resource</th><th>Path/Target</th><th>Access</th></tr></thead>
+        <tbody id="access"></tbody>
+      </table>
+    </div>
 
     <div class="card" style="margin-top:14px;">
       <div class="title">Custom Fetchers</div>
@@ -81,13 +98,13 @@ TEMPLATE = """
     </div>
 
     <div class="card" style="margin-top:14px;">
-      <div class="title">Firewall Flow (Local/Internal vs External)</div>
+      <div class="title"><span class="ico">*</span>Firewall Flow (Local/Internal vs External)</div>
       <div style="margin-bottom:8px;">
         <span class="chip">Policy: <span id="fw-policy">-</span></span>
         <span class="chip">Active Connections: <span id="fw-count">0</span></span>
       </div>
       <table>
-        <thead><tr><th>Type</th><th>User/Process</th><th>Local</th><th>Remote</th><th>Permission</th></tr></thead>
+        <thead><tr><th>Type</th><th>User/Process</th><th>LAN IF</th><th>Local</th><th>Remote</th><th>Permission</th></tr></thead>
         <tbody id="fwflows"></tbody>
       </table>
     </div>
@@ -132,10 +149,18 @@ async function load(){
   document.getElementById('ifaces').innerHTML = d.network.interfaces.map(i =>
     `<tr class="clickable" onclick="showDetails('interface','${esc(i.name)}','Interface: ${esc(i.name)}')"><td>${i.name}</td><td class="${cls(i.state)}">${i.state}</td><td>${i.ip || '-'}</td></tr>`).join('');
 
+  document.getElementById('users').innerHTML = d.users.map(u =>
+    `<tr><td>${esc(u.user)}</td><td>${esc(u.kind)}</td><td>${esc(u.source)}</td><td>${esc(u.status)}</td></tr>`
+  ).join('');
+
+  document.getElementById('access').innerHTML = d.access_matrix.map(a =>
+    `<tr><td>${esc(a.actor)}</td><td>${esc(a.resource)}</td><td>${esc(a.target)}</td><td>${esc(a.access)}</td></tr>`
+  ).join('');
+
   document.getElementById('fw-policy').textContent = d.firewall_flow.policy;
   document.getElementById('fw-count').textContent = d.firewall_flow.total;
   document.getElementById('fwflows').innerHTML = d.firewall_flow.connections.map(c =>
-    `<tr class="clickable" onclick="showDetails('connection','${esc(c.local + '->' + c.remote)}','Connection: ${esc(c.remote)}')"><td>${c.scope}</td><td>${esc(c.owner)}</td><td>${esc(c.local)}</td><td>${esc(c.remote)}</td><td class="${cls(c.permission)}">${esc(c.permission)}</td></tr>`
+    `<tr class="clickable" onclick="showDetails('connection','${esc(c.local + '->' + c.remote)}','Connection: ${esc(c.remote)}')"><td>${c.scope}</td><td>${esc(c.owner)}</td><td>${esc(c.interface)}</td><td>${esc(c.local)}</td><td>${esc(c.remote)}</td><td class="${cls(c.permission)}">${esc(c.permission)}</td></tr>`
   ).join('');
 }
 load();
@@ -266,6 +291,17 @@ def parse_ss_established():
     return rows
 
 
+def route_interface_for_ip(ip_value):
+    host = ip_value.rsplit(":", 1)[0].strip("[]")
+    out = run(f"ip route get {host}", include_stderr=False)
+    parts = out.split()
+    if "dev" in parts:
+        idx = parts.index("dev")
+        if idx + 1 < len(parts):
+            return parts[idx + 1]
+    return "unknown"
+
+
 def scope_for_remote(remote):
     host = remote.rsplit(":", 1)[0].strip("[]")
     try:
@@ -292,6 +328,71 @@ def connection_owner(proc):
     return proc.replace('users:(("', "").replace('"))', "")
 
 
+def current_users():
+    users = []
+    for line in run("who").splitlines():
+        p = line.split()
+        if p:
+            users.append({"user": p[0], "kind": "shell", "source": p[1] if len(p) > 1 else "-", "status": "logged-in"})
+    smb = run("smbstatus -b", include_stderr=True)
+    for line in smb.splitlines():
+        if "smbd version" in line.lower() or "pid" in line.lower():
+            continue
+        p = line.split()
+        if len(p) >= 2 and p[0].isdigit():
+            users.append({"user": p[1], "kind": "smb", "source": "samba", "status": "connected"})
+    if not users:
+        users.append({"user": "none", "kind": "system", "source": "-", "status": "no-active-user"})
+    return users
+
+
+def parse_smb_shares():
+    conf = run("testparm -s", include_stderr=True)
+    shares = []
+    current = None
+    for raw in conf.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            name = line[1:-1]
+            if name and name.lower() != "global":
+                current = {"share": name, "path": "-", "users": "all", "access": "read-only"}
+                shares.append(current)
+            else:
+                current = None
+            continue
+        if not current or "=" not in line:
+            continue
+        k, v = [x.strip() for x in line.split("=", 1)]
+        if k == "path":
+            current["path"] = v
+        elif k == "valid users":
+            current["users"] = v
+        elif k == "read only":
+            current["access"] = "read-only" if v.lower() in ("yes", "true") else "read-write"
+    return shares
+
+
+def access_matrix():
+    rows = []
+    for c in firewall_flow()["connections"][:120]:
+        rows.append({
+            "actor": c["owner"],
+            "resource": "network",
+            "target": c["remote"],
+            "access": c["permission"],
+        })
+    for s in parse_smb_shares():
+        rows.append({
+            "actor": s["users"],
+            "resource": f"smb-share:{s['share']}",
+            "target": s["path"],
+            "access": s["access"],
+        })
+    if not rows:
+        rows.append({"actor": "none", "resource": "none", "target": "-", "access": "no-data"})
+    return rows
+
+
 def firewall_flow():
     conns = parse_ss_established()
     rows = []
@@ -300,6 +401,7 @@ def firewall_flow():
         rows.append({
             "scope": scope,
             "owner": connection_owner(c["proc"]),
+            "interface": route_interface_for_ip(c["remote"]),
             "local": c["local"],
             "remote": c["remote"],
             "permission": permission_hint(scope),
@@ -335,6 +437,8 @@ def api_status():
             "interfaces": interfaces(),
         },
         "firewall_flow": firewall_flow(),
+        "users": current_users(),
+        "access_matrix": access_matrix(),
     }
     return jsonify(data)
 
