@@ -132,6 +132,14 @@ TEMPLATE = """
     </div>
 
     <div class="card" style="margin-top:14px;">
+      <div class="title"><span class="ico">+</span>Router Health</div>
+      <table>
+        <thead><tr><th>Check</th><th>Status</th><th>Details</th></tr></thead>
+        <tbody id="rhealth"></tbody>
+      </table>
+    </div>
+
+    <div class="card" style="margin-top:14px;">
       <div class="title">Custom Fetchers</div>
       <table>
         <thead><tr><th>Service</th><th>Status</th><th>Enabled</th></tr></thead>
@@ -177,7 +185,7 @@ TEMPLATE = """
   </div>
 
 <script>
-function cls(v){ if(v==='active' || v==='running' || v===true) return 'ok'; if(v==='inactive' || v==='unknown') return 'warn'; return 'bad'; }
+function cls(v){ if(v==='active' || v==='running' || v===true || v==='ok') return 'ok'; if(v==='inactive' || v==='unknown' || v==='warn') return 'warn'; return 'bad'; }
 function text(v){ return (v===true)?'yes':(v===false)?'no':String(v); }
 function esc(s){ return String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('\"','&quot;').replaceAll(\"'\",'&#39;'); }
 function goDetail(kind, name, label){
@@ -232,6 +240,9 @@ function renderStatus(d){
     ['Internet', d.network.internet, 'internet', 'internet'],
   ];
   document.getElementById('top').innerHTML = top.map(([k,v,kind,name]) => `<div class="card clickable" onclick="goDetail('${esc(kind)}','${esc(name)}','${esc(k)}')"><div class="title">${k}</div><div class="value ${cls(v)}">${text(v)}</div></div>`).join('');
+  document.getElementById('rhealth').innerHTML = (d.router_health?.checks || []).map(c =>
+    `<tr><td>${esc(c.name)}</td><td class="${cls(c.level)}">${esc(c.level)}</td><td>${esc(c.detail)}</td></tr>`
+  ).join('');
 
   document.getElementById('fetchers').innerHTML = d.custom_fetchers.map(s =>
     `<tr class="clickable" onclick="goDetail('service','${esc(s.name)}','Fetcher: ${esc(s.name)}')"><td>${s.name}</td><td class="${cls(s.active)}">${s.active}</td><td>${s.enabled}</td></tr>`).join('');
@@ -808,6 +819,75 @@ def router_policy():
     }
 
 
+def parse_default_routes():
+    out = run("ip route show default")
+    rows = []
+    for line in out.splitlines():
+        parts = line.split()
+        if "via" in parts and "dev" in parts:
+            gw = parts[parts.index("via") + 1]
+            iface = parts[parts.index("dev") + 1]
+            rows.append({"gateway": gw, "interface": iface})
+    return rows
+
+
+def ping_ok(host):
+    rc, _, _ = run_with_rc(f"ping -c 1 -W 1 {host}")
+    return rc == 0
+
+
+def dns_ok():
+    rc, out, _ = run_with_rc("getent hosts google.com")
+    return rc == 0 and bool(out.strip())
+
+
+def router_health():
+    checks = []
+    routes = parse_default_routes()
+    if not routes:
+        checks.append({"name": "Default Route", "level": "bad", "detail": "No default route configured"})
+    else:
+        bad = []
+        good = []
+        for r in routes:
+            if ping_ok(r["gateway"]):
+                good.append(f"{r['gateway']} via {r['interface']}")
+            else:
+                bad.append(f"{r['gateway']} via {r['interface']}")
+        if bad:
+            checks.append({"name": "Gateway Reachability", "level": "bad", "detail": "Unreachable: " + ", ".join(bad)})
+        else:
+            checks.append({"name": "Gateway Reachability", "level": "ok", "detail": ", ".join(good)})
+
+    dns = dns_ok()
+    checks.append({
+        "name": "DNS Resolution",
+        "level": "ok" if dns else "bad",
+        "detail": "getent hosts google.com " + ("ok" if dns else "failed"),
+    })
+    net = internet_ok()
+    checks.append({
+        "name": "Internet Reachability",
+        "level": "ok" if net else "bad",
+        "detail": "TCP 1.1.1.1:53 " + ("ok" if net else "failed"),
+    })
+
+    rp = router_policy()
+    blocked = sum(1 for c in rp["connections"] if c["policy"] == "not-in-allowlist")
+    if blocked > 0:
+        checks.append({"name": "Allowlist Blocks", "level": "warn", "detail": f"{blocked} active external connections not in allowlist"})
+    else:
+        checks.append({"name": "Allowlist Blocks", "level": "ok", "detail": "No active blocked external connections"})
+
+    peer = peer_summary()
+    empty_if = [p["interface"] for p in peer if p["local_ips"] and p["connected_count"] == 0]
+    if empty_if:
+        checks.append({"name": "LAN Clients", "level": "warn", "detail": "No clients seen on: " + ", ".join(empty_if)})
+    else:
+        checks.append({"name": "LAN Clients", "level": "ok", "detail": "Clients detected on active LAN interfaces"})
+    return {"checks": checks}
+
+
 def admin_active():
     exp = session.get("admin_exp")
     if not exp:
@@ -953,6 +1033,7 @@ def api_status():
         "users": current_users(),
         "access_matrix": access_matrix(),
         "router_policy": router_policy(),
+        "router_health": router_health(),
     }
     return jsonify(data)
 
