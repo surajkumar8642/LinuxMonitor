@@ -79,6 +79,13 @@ TEMPLATE = """
     <div class="grid" id="top"></div>
 
     <div class="card" style="margin-top:14px;">
+      <div class="title"><span class="ico">+</span>Router Health</div>
+      <table>
+        <thead><tr><th>Check</th><th>Status</th><th>Details</th></tr></thead>
+        <tbody id="rhealth"></tbody>
+      </table>
+    </div>
+    <div class="card" style="margin-top:14px;">
       <div class="title"><span class="ico">#</span>User Insights</div>
       <table>
         <thead><tr><th>User</th><th>Type</th><th>Source</th><th>Status</th></tr></thead>
@@ -131,13 +138,7 @@ TEMPLATE = """
       <pre id="admin-out" style="white-space:pre-wrap; margin:10px 0 0; color:var(--muted); font-size:13px;"></pre>
     </div>
 
-    <div class="card" style="margin-top:14px;">
-      <div class="title"><span class="ico">+</span>Router Health</div>
-      <table>
-        <thead><tr><th>Check</th><th>Status</th><th>Details</th></tr></thead>
-        <tbody id="rhealth"></tbody>
-      </table>
-    </div>
+
 
     <div class="card" style="margin-top:14px;">
       <div class="title">Custom Fetchers</div>
